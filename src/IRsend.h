@@ -56,14 +56,15 @@ enum class opmode_t {
 
 /// Common A/C settings for Fan Speeds.
 enum class fanspeed_t {
-  kAuto =   0,
-  kMin =    1,
-  kLow =    2,
-  kMedium = 3,
-  kHigh =   4,
-  kMax =    5,
+  kAuto =       0,
+  kMin =        1,
+  kLow =        2,
+  kMedium =     3,
+  kHigh =       4,
+  kMax =        5,
+  kMediumHigh = 6,
   // Add new entries before this one, and update it to point to the last entry
-  kLastFanspeedEnum = kMax,
+  kLastFanspeedEnum = kMediumHigh,
 };
 
 /// Common A/C settings for Vertical Swing.
@@ -75,8 +76,21 @@ enum class swingv_t {
   kMiddle =  3,
   kLow =     4,
   kLowest =  5,
+  kUpperMiddle = 6,
   // Add new entries before this one, and update it to point to the last entry
-  kLastSwingvEnum = kLowest,
+  kLastSwingvEnum = kUpperMiddle,
+};
+
+/// @brief Tyoe of A/C command (if the remote uses different codes for each)
+/// @note Most remotes support only a single command or aggregate multiple
+///       into one (e.g. control+timer). Use @c kControlCommand in such case
+enum class ac_command_t {
+  kControlCommand = 0,
+  kTemperatureReport = 1,
+  kTimerCommand = 2,
+  kConfigCommand = 3,
+  // Add new entries before this one, and update it to point to the last entry
+  kLastAcCommandEnum = kConfigCommand,
 };
 
 /// Common A/C settings for Horizontal Swing.
@@ -113,6 +127,9 @@ struct state_t {
   bool beep = false;
   int16_t sleep = -1;  // `-1` means off.
   int16_t clock = -1;  // `-1` means not set.
+  bool iFeel = false;
+  float roomTemperature = -1;  // `-1` means not set.
+  stdAc::ac_command_t command = stdAc::ac_command_t::kControlCommand;
 };
 };  // namespace stdAc
 
@@ -202,6 +219,11 @@ enum lg_ac_remote_model_t {
   LG6711A20083V,      // (5) Same as GE6711AR2853M, but only SwingV toggle.
 };
 
+/// Argo A/C model numbers
+enum argo_ac_remote_model_t {
+  SAC_WREM2 = 1,   // (1) ARGO WREM2 remote (default)
+  SAC_WREM3        // (2) ARGO WREM3 remote (touch buttons), bit-len vary by cmd
+};
 
 // Classes
 
@@ -529,8 +551,12 @@ class IRsend {
 #if SEND_ARGO
   void sendArgo(const unsigned char data[],
                 const uint16_t nbytes = kArgoStateLength,
+                const uint16_t repeat = kArgoDefaultRepeat,
+                bool sendFooter = false);
+  void sendArgoWREM3(const unsigned char data[],
+                const uint16_t nbytes = kArgoStateLength,
                 const uint16_t repeat = kArgoDefaultRepeat);
-#endif
+#endif  // SEND_ARGO
 #if SEND_TROTEC
   void sendTrotec(const unsigned char data[],
                   const uint16_t nbytes = kTrotecStateLength,

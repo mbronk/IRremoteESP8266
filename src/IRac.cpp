@@ -64,6 +64,34 @@
 #endif  // ESP8266
 #endif  // STRCASECMP
 
+#ifndef UNIT_TEST
+#define OUTPUT_DECODE_RESULTS_FOR_UT(ac)
+#else
+/// If compiling for UT *and* a test receiver @c IRrecv is provided via the
+/// @c _utReceived param, this injects an "output" gadget @c _lastDecodeResults
+/// into the @c IRAc::sendAc method, so that the UT code may parse the "sent"
+/// value and drive further assertions
+///
+/// @note The @c decode_results "returned" is a shallow copy (empty rawbuf),
+///       mostly b/c the class does not have a custom/deep copy c-tor
+///       and defining it would be an overkill for this purpose
+/// @note For future maintainers: If @c IRAc class is ever refactored to use
+///       polymorphism (static or dynamic)... this macro should be removed
+///       and replaced with proper GMock injection.
+#define OUTPUT_DECODE_RESULTS_FOR_UT(ac)                        \
+  {                                                             \
+    if (_utReceiver) {                                          \
+      _lastDecodeResults = nullptr;                             \
+      (ac)._irsend.makeDecodeResult();                          \
+      if (_utReceiver->decode(&(ac)._irsend.capture)) {         \
+        _lastDecodeResults = std::unique_ptr<decode_results>(   \
+          new decode_results((ac)._irsend.capture));            \
+        _lastDecodeResults->rawbuf = nullptr;                   \
+      }                                                         \
+    }                                                           \
+  }
+#endif  // UNIT_TEST
+
 /// Class constructor
 /// @param[in] pin Gpio pin to use when transmitting IR messages.
 /// @param[in] inverted true, gpio output defaults to high. false, to low.
@@ -462,6 +490,109 @@ void IRac::argo(IRArgoAC *ac,
   // No Clean setting available.
   // No Beep setting available.
   ac->setNight(sleep >= 0);  // Convert to a boolean.
+  ac->send();
+}
+
+/// Send an Argo A/C WREM-3 AC **control** message with the supplied settings.
+/// @param[in, out] ac A Ptr to an IRArgoAC_WREM3 object to use.
+/// @param[in] on The power setting.
+/// @param[in] mode The operation mode setting.
+/// @param[in] degrees The set temperature setting in degrees Celsius.
+/// @param[in] roomTemp The room (iFeel) temperature setting in degrees Celsius.
+/// @param[in] fan The speed setting for the fan.
+/// @param[in] swingv The vertical swing setting.
+/// @param[in] iFeel Whether to enable iFeel mode on the A/C unit.
+/// @param[in] night Enable night mode (raises temp by +1*C after 1h).
+/// @param[in] econo Enable eco mode (limits power consumed).
+/// @param[in] turbo Run the device in turbo/powerful mode.
+/// @param[in] filter Enable filter mode
+/// @param[in] light Enable device display/LEDs
+void IRac::argoWrem3_ACCommand(IRArgoAC_WREM3 *ac, const bool on,
+    const stdAc::opmode_t mode, const float degrees, const float roomTemp,
+    const stdAc::fanspeed_t fan, const stdAc::swingv_t swingv, const bool iFeel,
+    const bool night, const bool econo, const bool turbo, const bool filter,
+    const bool light) {
+  ac->begin();
+  ac->setMessageType(argoIrMessageType_t::AC_CONTROL);
+  ac->setPower(on);
+  ac->setMode(ac->convertMode(mode));
+  ac->setTemp(degrees);
+  ac->setRoomTemp(roomTemp);
+  ac->setFan(ac->convertFan(fan));
+  ac->setFlap(ac->convertSwingV(swingv));
+  ac->setiFeel(iFeel);
+  ac->setNight(night);
+  ac->setEco(econo);
+  ac->setMax(turbo);
+  ac->setFilter(filter);
+  ac->setLight(light);
+  // No Clean setting available.
+  // No Beep setting available - always beeps in this mode :)
+  ac->send();
+}
+
+/// Send an Argo A/C WREM-3 iFeel (room temp) silent (no beep) report.
+/// @param[in, out] ac A Ptr to an IRArgoAC_WREM3 object to use.
+/// @param[in] roomTemp The room (iFeel) temperature setting in degrees Celsius.
+void IRac::argoWrem3_iFeelReport(IRArgoAC_WREM3 *ac, const float roomTemp) {
+  ac->begin();
+  ac->setMessageType(argoIrMessageType_t::IFEEL_TEMP_REPORT);
+  ac->setRoomTemp(roomTemp);
+  ac->send();
+}
+
+/// Send an Argo A/C WREM-3 Config command.
+/// @param[in, out] ac A Ptr to an IRArgoAC_WREM3 object to use.
+/// @param[in] param The parameter ID.
+/// @param[in] value The parameter value.
+/// @param[in] safe If true, will only allow setting the below parameters
+///                 in order to avoid accidentally setting a restricted
+///                 vendor-specific param and breaking the A/C device
+/// @note Known parameters (P<xx>, where xx is the @c param)
+///       P05 - Temperature Scale (0-Celsius, 1-Fahrenheit)
+///       P06 - Transmission channel (0..3)
+///       P12 - ECO mode power input limit (30..99, default: 75)
+void IRac::argoWrem3_ConfigSet(IRArgoAC_WREM3 *ac, const uint8_t param,
+    const uint8_t value, bool safe /*= true*/) {
+  if (safe) {
+    switch (param) {
+      case 5:  // temp. scale (note this is likely excess as not transmitted)
+        if (value > 1) { return;  /* invalid */ }
+        break;
+      case 6:  // channel (note this is likely excess as not transmitted)
+        if (value > 3) { return;  /* invalid */ }
+        break;
+      case 12:  // eco power limit
+        if (value < 30 || value > 99) { return;  /* invalid */ }
+        break;
+      default:
+        return;  /* invalid */
+    }
+  }
+  ac->begin();
+  ac->setMessageType(argoIrMessageType_t::CONFIG_PARAM_SET);
+  ac->setConfigEntry(param, value);
+  ac->send();
+}
+
+/// Send an Argo A/C WREM-3 Delay timer command.
+/// @param[in, out] ac A Ptr to an IRArgoAC_WREM3 object to use.
+/// @param[in] on Whether the unit is currently on. The timer, upon elapse
+///               will toggle this state
+/// @param[in] currentTime currentTime in minutes, starting from 00:00
+/// @note For timer mode, this value is not really used much so can be zero.
+/// @param[in] delayMinutes Number of minutes after which the @c on state should
+///                         be toggled
+/// @note Schedule timers are not exposed via this interface
+void IRac::argoWrem3_SetTimer(IRArgoAC_WREM3 *ac, bool on,
+    const uint16_t currentTime, const uint16_t delayMinutes) {
+  ac->begin();
+  ac->setMessageType(argoIrMessageType_t::TIMER_COMMAND);
+  ac->setPower(on);
+  ac->setTimerType(argoTimerType_t::DELAY_TIMER);
+  ac->setCurrentTimeMinutes(currentTime);
+  // Note: Day of week is not set (no need)
+  ac->setDelayTimerMinutes(delayMinutes);
   ac->send();
 }
 #endif  // SEND_ARGO
@@ -2654,6 +2785,7 @@ stdAc::state_t IRac::cleanState(const stdAc::state_t state) {
   // A hack for Home Assistant, it appears to need/want an Off opmode.
   // So enforce the power is off if the mode is also off.
   if (state.mode == stdAc::opmode_t::kOff) result.power = false;
+  if (state.roomTemperature == -1.0) result.roomTemperature = state.degrees;
   return result;
 }
 
@@ -2850,9 +2982,36 @@ bool IRac::sendAc(const stdAc::state_t desired, const stdAc::state_t *prev) {
 #if SEND_ARGO
     case ARGO:
     {
-      IRArgoAC ac(_pin, _inverted, _modulation);
-      argo(&ac, send.power, send.mode, degC, send.fanspeed, send.swingv,
-           send.turbo, send.sleep);
+      if (send.model == argo_ac_remote_model_t::SAC_WREM3) {
+        IRArgoAC_WREM3 ac(_pin, _inverted, _modulation);
+        switch (send.command) {
+          case stdAc::ac_command_t::kTemperatureReport:
+            argoWrem3_iFeelReport(&ac, send.roomTemperature);
+            break;
+          case stdAc::ac_command_t::kConfigCommand:
+            /// @warning: this is ABUSING current **common** parameters:
+            ///           @c clock and @c sleep as config key and value
+            ///           Hence, value pre-validation is performed (safe-mode)
+            ///           to avoid accidental device misconfiguration
+            argoWrem3_ConfigSet(&ac, send.clock, send.sleep, true);
+            break;
+          case stdAc::ac_command_t::kTimerCommand:
+            argoWrem3_SetTimer(&ac, send.power, send.clock, send.sleep);
+            break;
+          case stdAc::ac_command_t::kControlCommand:
+          default:
+            argoWrem3_ACCommand(&ac, send.power, send.mode, send.degrees,
+              send.roomTemperature, send.fanspeed, send.swingv, send.iFeel,
+              send.quiet, send.econo, send.turbo, send.filter, send.light);
+            break;
+        }
+        OUTPUT_DECODE_RESULTS_FOR_UT(ac);
+      } else {
+        IRArgoAC ac(_pin, _inverted, _modulation);
+        argo(&ac, send.power, send.mode, degC, send.fanspeed, send.swingv,
+            send.turbo, send.sleep);
+        OUTPUT_DECODE_RESULTS_FOR_UT(ac);
+      }
       break;
     }
 #endif  // SEND_ARGO
@@ -3421,13 +3580,35 @@ bool IRac::cmpStates(const stdAc::state_t a, const stdAc::state_t b) {
       a.fanspeed != b.fanspeed || a.swingv != b.swingv ||
       a.swingh != b.swingh || a.quiet != b.quiet || a.turbo != b.turbo ||
       a.econo != b.econo || a.light != b.light || a.filter != b.filter ||
-      a.clean != b.clean || a.beep != b.beep || a.sleep != b.sleep;
+      a.clean != b.clean || a.beep != b.beep || a.sleep != b.sleep ||
+      a.mode != b.mode || a.roomTemperature != b.roomTemperature ||
+      a.iFeel != b.iFeel;
 }
 
 /// Check if the internal state has changed from what was previously sent.
 /// @note The comparison excludes the clock.
 /// @return True if it has changed, False if not.
 bool IRac::hasStateChanged(void) { return cmpStates(next, _prev); }
+
+/// Convert the supplied str into the appropriate enum.
+/// @param[in] str A Ptr to a C-style string to be converted.
+/// @param[in] def The enum to return if no conversion was possible.
+/// @return The equivalent enum.
+stdAc::ac_command_t IRac::strToCommandType(const char *str,
+                                           const stdAc::ac_command_t def) {
+  if (!STRCASECMP(str, kControlCommandStr))
+    return stdAc::ac_command_t::kControlCommand;
+  else if (!STRCASECMP(str, kTemperatureReportStr) ||
+           !STRCASECMP(str, kIFeelStr))
+    return stdAc::ac_command_t::kTemperatureReport;
+  else if (!STRCASECMP(str, kTimerCommandStr) ||
+           !STRCASECMP(str, kTimerStr))
+    return stdAc::ac_command_t::kTimerCommand;
+  else if (!STRCASECMP(str, kConfigCommandStr))
+    return stdAc::ac_command_t::kConfigCommand;
+  else
+    return def;
+}
 
 /// Convert the supplied str into the appropriate enum.
 /// @param[in] str A Ptr to a C-style string to be converted.
@@ -3492,6 +3673,8 @@ stdAc::fanspeed_t IRac::strToFanspeed(const char *str,
            !STRCASECMP(str, kMaximumStr) ||
            !STRCASECMP(str, kHighestStr))
     return stdAc::fanspeed_t::kMax;
+  else if (!STRCASECMP(str, kMedHighStr))
+    return stdAc::fanspeed_t::kMediumHigh;
   else
     return def;
 }
@@ -3666,6 +3849,11 @@ int16_t IRac::strToModel(const char *str, const int16_t def) {
     return whirlpool_ac_remote_model_t::DG11J13A;
   } else if (!STRCASECMP(str, kDg11j191Str)) {
     return whirlpool_ac_remote_model_t::DG11J191;
+  // Argo A/C models
+  } else if (!STRCASECMP(str, kArgoWrem2Str)) {
+    return argo_ac_remote_model_t::SAC_WREM2;
+  } else if (!STRCASECMP(str, kArgoWrem3Str)) {
+    return argo_ac_remote_model_t::SAC_WREM3;
   } else {
     int16_t number = atoi(str);
     if (number > 0)
@@ -3699,6 +3887,19 @@ bool IRac::strToBool(const char *str, const bool def) {
 /// @return The equivalent String for the locale.
 String IRac::boolToString(const bool value) {
   return value ? kOnStr : kOffStr;
+}
+
+/// Convert the supplied operation mode into the appropriate String.
+/// @param[in] cmdType The enum to be converted.
+/// @return The equivalent String for the locale.
+String IRac::commandTypeToString(const stdAc::ac_command_t cmdType) {
+  switch (cmdType) {
+    case stdAc::ac_command_t::kControlCommand:    return kControlCommandStr;
+    case stdAc::ac_command_t::kTemperatureReport: return kTemperatureReportStr;
+    case stdAc::ac_command_t::kTimerCommand:      return kTimerCommandStr;
+    case stdAc::ac_command_t::kConfigCommand:     return kConfigCommandStr;
+    default:                                      return kUnknownStr;
+  }
 }
 
 /// Convert the supplied operation mode into the appropriate String.
@@ -3737,14 +3938,15 @@ String IRac::fanspeedToString(const stdAc::fanspeed_t speed) {
 /// @return The equivalent String for the locale.
 String IRac::swingvToString(const stdAc::swingv_t swingv) {
   switch (swingv) {
-    case stdAc::swingv_t::kOff:     return kOffStr;
-    case stdAc::swingv_t::kAuto:    return kAutoStr;
-    case stdAc::swingv_t::kHighest: return kHighestStr;
-    case stdAc::swingv_t::kHigh:    return kHighStr;
-    case stdAc::swingv_t::kMiddle:  return kMiddleStr;
-    case stdAc::swingv_t::kLow:     return kLowStr;
-    case stdAc::swingv_t::kLowest:  return kLowestStr;
-    default:                        return kUnknownStr;
+    case stdAc::swingv_t::kOff:          return kOffStr;
+    case stdAc::swingv_t::kAuto:         return kAutoStr;
+    case stdAc::swingv_t::kHighest:      return kHighestStr;
+    case stdAc::swingv_t::kHigh:         return kHighStr;
+    case stdAc::swingv_t::kMiddle:       return kMiddleStr;
+    case stdAc::swingv_t::kUpperMiddle:  return kUpperMiddleStr;
+    case stdAc::swingv_t::kLow:          return kLowStr;
+    case stdAc::swingv_t::kLowest:       return kLowestStr;
+    default:                             return kUnknownStr;
   }
 }
 
@@ -3796,6 +3998,12 @@ namespace IRAcUtils {
 #endif  // DECODE_AMCOR
 #if DECODE_ARGO
       case decode_type_t::ARGO: {
+        if (IRArgoAC_WREM3::isValidWrem3Message(result->state, result->bits,
+                                                true)) {
+          IRArgoAC_WREM3 ac(kGpioUnused);
+          ac.setRaw(result->state, result->bits / 8);
+          return ac.toString();
+        }
         IRArgoAC ac(kGpioUnused);
         ac.setRaw(result->state, result->bits / 8);
         return ac.toString();
@@ -4258,15 +4466,23 @@ namespace IRAcUtils {
 #endif  // DECODE_AMCOR
 #if DECODE_ARGO
       case decode_type_t::ARGO: {
-        IRArgoAC ac(kGpioUnused);
         const uint16_t length = decode->bits / 8;
-        switch (length) {
-          case kArgoStateLength:
-            ac.setRaw(decode->state, length);
-            *result = ac.toCommon();
-            break;
-          default:
-            return false;
+        if (IRArgoAC_WREM3::isValidWrem3Message(decode->state,
+                                                decode->bits, true)) {
+          IRArgoAC_WREM3 ac(kGpioUnused);
+          ac.setRaw(decode->state, length);
+          *result = ac.toCommon();
+        } else {
+          IRArgoAC ac(kGpioUnused);
+          switch (length) {
+            case kArgoStateLength:
+            case kArgoShortStateLength:
+              ac.setRaw(decode->state, length);
+              *result = ac.toCommon();
+              break;
+            default:
+              return false;
+          }
         }
         break;
       }
