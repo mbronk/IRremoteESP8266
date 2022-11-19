@@ -20,6 +20,7 @@
 #include <IRremoteESP8266.h>
 #include <IRrecv.h>
 #include <IRutils.h>
+#include <IRac.h>
 
 // An IR detector/demodulator is connected to GPIO pin 14(D5 on a NodeMCU
 // board).
@@ -31,7 +32,7 @@ const uint16_t kRecvPin = 10;  // 14 on a ESP32-C3 causes a boot loop.
 const uint16_t kRecvPin = 14;
 #endif  // ARDUINO_ESP32C3_DEV
 
-IRrecv irrecv(kRecvPin);
+IRrecv irrecv(kRecvPin, 500);
 
 decode_results results;
 
@@ -49,7 +50,12 @@ void loop() {
   if (irrecv.decode(&results)) {
     // print() & println() can't handle printing long longs. (uint64_t)
     serialPrintUint64(results.value, HEX);
-    Serial.println("");
+    Serial.println(resultToHumanReadableBasic(&results));
+    Serial.println(resultToSourceCode(&results));
+    // Display any extra A/C info if we have it.
+    String description = IRAcUtils::resultAcToString(&results);
+    if (description.length()) Serial.println(D_STR_MESGDESC ": " + description);
+    // Serial.println("");
     irrecv.resume();  // Receive the next value
   }
   delay(100);

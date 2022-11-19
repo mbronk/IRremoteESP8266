@@ -54,7 +54,7 @@ const uint32_t kBaudRate = 115200;
 
 // As this program is a special purpose capture/decoder, let us use a larger
 // than normal buffer so we can handle Air Conditioner remote codes.
-const uint16_t kCaptureBufferSize = 1024;
+const uint16_t kCaptureBufferSize = 2024;
 
 // kTimeout is the Nr. of milli-Seconds of no-more-data before we consider a
 // message ended.
@@ -104,7 +104,7 @@ const uint8_t kTimeout = 15;
 // Set lower if you are sure your setup is working, but it doesn't see messages
 // from your device. (e.g. Other IR remotes work.)
 // NOTE: Set this value very high to effectively turn off UNKNOWN detection.
-const uint16_t kMinUnknownSize = 12;
+const uint16_t kMinUnknownSize = 12+40;
 
 // How much percentage lee way do we give to incoming signals in order to match
 // it?
